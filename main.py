@@ -128,6 +128,19 @@ def main():
 
         decoded, _ = decode_bencode(bencoded_value)
         print(json.dumps(decoded, default=bytes_to_str))
+    
+    elif command == "info":
+        file_name = sys.argv[2]
+        
+        with open(file_name, "rb") as f:
+            data = f.read()
+        
+            decoded, _ = decode_bencode(data)
+            
+            print(decoded)
+            if isinstance(decoded, dict):
+                print(f"Tracker URL: {decoded["announce"].decode()}")
+                print(f"Length: {decoded["info"]["length"]}")
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
