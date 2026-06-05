@@ -11,6 +11,7 @@ import hashlib
 # - decode_string(b"5:hello") -> b"hello"
 # - decode_string(b"10:hello12345") -> b"hello12345"
 
+SHA1_SIZE = 20
 
 def decode_string(bencoded_value: bytes, start: int) -> tuple[bytes, int]:
     colon_index = bencoded_value.find(b":", start)
@@ -232,6 +233,16 @@ def main():
                 print(
                     f"Info Hash: {hashlib.sha1(encode_bencode(decoded['info'])).hexdigest()}"
                 )
+                print(f"Piece Length: {decoded['info']['piece length']}")
+                print(f"Piece Hashes: {decoded['info']['piece length']}")
+
+                pieces: bytes = decoded['info']['pieces']
+
+                if len(pieces) % SHA1_SIZE != 0:
+                    raise ValueError(f"Invalid torrent: pieces field length is not divisible by {SHA1_SIZE}")
+                
+                for i in range(0, len(pieces), SHA1_SIZE):
+                    print(pieces[i:i+SHA1_SIZE].hex())
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
