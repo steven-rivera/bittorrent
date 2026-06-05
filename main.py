@@ -1,5 +1,6 @@
 import json
 import sys
+import hashlib
 
 # import bencodepy - available if you need it!
 # import requests - available if you need it!
@@ -48,7 +49,7 @@ def decode_integer(bencoded_value: bytes, start: int) -> tuple[int, int]:
         return integer, e_char_index + 1
 
 
-# Examples:
+# Example:
 #
 # - decode_list(b"l5:helloi52ee") -> ["hello",52]
 
@@ -65,7 +66,7 @@ def decode_list(bencoded_value: bytes, start: int) -> tuple[list, int]:
     return decoded_list, curr + 1
 
 
-# Examples:
+# Example:
 #
 # - decode_dictionary(b"d3:foo3:bar5:helloi52ee") -> {"foo":"bar", "hello": 52}
 
@@ -104,7 +105,94 @@ def decode_bencode(
     if chr(bencoded_value[start]) == "d":
         return decode_dictionary(bencoded_value, start)
 
-    raise NotImplementedError("Only strings are supported at the moment")
+    raise NotImplementedError(
+        "Only strings, ints, lists, and dictionaries are supported at the moment"
+    )
+
+
+# Example:
+#
+# - encode_string("hello") -> b"5:hello"
+
+
+def encode_string(string: str) -> bytes:
+    return f"{len(string)}:{string}".encode()
+
+
+# Example:
+#
+# - encode_bytes(b"hello") -> b"5:hello"
+
+
+def encode_bytes(byte_string: bytes) -> bytes:
+    buf = bytearray(f"{len(byte_string)}:".encode())
+    buf.extend(byte_string)
+
+    return bytes(buf)
+
+
+# Examples:
+#
+# - encode_integer(52) -> b"i52e"
+# - encode_integer(-52) -> b"i-52e"
+
+
+def encode_integer(integer: int) -> bytes:
+    return f"i{integer}e".encode()
+
+
+# Example:
+#
+# - encode_list(["hello",52]) -> b"l5:helloi52ee"
+
+
+def encode_list(lst: list) -> bytes:
+    buf = bytearray(b"l")
+
+    for item in lst:
+        buf.extend(encode_bencode(item))
+
+    buf.extend(b"e")
+
+    return bytes(buf)
+
+
+# Example:
+#
+# - encode_dictionary({"foo":"bar", "hello": 52}) -> b"d3:foo3:bar5:helloi52ee"
+
+
+def encode_dictionary(dictionary: dict) -> bytes:
+    buf = bytearray(b"d")
+
+    for key, value in sorted(dictionary.items()):
+        if not isinstance(key, str):
+            raise ValueError("Bencoded dictionary only allows strings as keys")
+
+        buf.extend(encode_string(key))
+        buf.extend(encode_bencode(value))
+
+    buf.extend(b"e")
+
+    return bytes(buf)
+
+
+def encode_bencode(obj: bytes | str | int | list | dict) -> bytes:
+
+    if isinstance(obj, bytes):
+        return encode_bytes(obj)
+    if isinstance(obj, str):
+        return encode_string(obj)
+    if isinstance(obj, int):
+        return encode_integer(obj)
+    if isinstance(obj, list):
+        return encode_list(obj)
+    if isinstance(obj, dict):
+        return encode_dictionary(obj)
+
+    raise NotImplementedError(
+        "Only strings, ints, lists, and dictionaries are supported at the moment"
+    )
 
 
 def main():
@@ -128,19 +216,22 @@ def main():
 
         decoded, _ = decode_bencode(bencoded_value)
         print(json.dumps(decoded, default=bytes_to_str))
-    
+
     elif command == "info":
         file_name = sys.argv[2]
-        
+
         with open(file_name, "rb") as f:
             data = f.read()
-        
+
             decoded, _ = decode_bencode(data)
-            
+
             print(decoded)
             if isinstance(decoded, dict):
-                print(f"Tracker URL: {decoded["announce"].decode()}")
-                print(f"Length: {decoded["info"]["length"]}")
+                print(f"Tracker URL: {decoded['announce'].decode()}")
+                print(f"Length: {decoded['info']['length']}")
+                print(
+                    f"Info Hash: {hashlib.sha1(encode_bencode(decoded['info'])).hexdigest()}"
+                )
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
