@@ -4,6 +4,8 @@ import hashlib
 import requests
 import random
 import string
+import os
+import socket
 
 # Examples:
 #
@@ -261,11 +263,13 @@ def main():
                     tracker_url,
                     params={
                         "info_hash": info_hash,
-                        "peer_id": ''.join(random.choices(string.ascii_letters + string.digits, k=20)),
+                        "peer_id": "".join(
+                            random.choices(string.ascii_letters + string.digits, k=20)
+                        ),
                         "port": 6881,
                         "uploaded": 0,
                         "downloaded": 0,
-                        "left": decoded['info']['length'],
+                        "left": decoded["info"]["length"],
                         "compact": 1,
                     },
                 )
@@ -273,10 +277,44 @@ def main():
                 if r.status_code == requests.codes.ok:
                     decoded_resp, _ = decode_bencode(r.content)
                     if isinstance(decoded_resp, dict):
-                        peers = decoded_resp['peers']
+                        peers = decoded_resp["peers"]
                         for i in range(0, len(peers), 6):
-                            print(f"{peers[i]}.{peers[i+1]}.{peers[i+2]}.{peers[i+3]}:{int.from_bytes(peers[i+4:i+6], byteorder='big')}")
+                            print(
+                                f"{peers[i]}.{peers[i + 1]}.{peers[i + 2]}.{peers[i + 3]}:{int.from_bytes(peers[i + 4 : i + 6], byteorder='big')}"
+                            )
 
+    elif command == "handshake":
+        file_name = sys.argv[2]
+        ip, port = sys.argv[3].split(":")
+
+        length = b"\x13"
+        protocol = "BitTorrent protocol".encode()
+        reserved = b"\x00" * 8
+        peer_id = os.urandom(20) 
+
+        with open(file_name, "rb") as f:
+            data = f.read()
+            decoded, _ = decode_bencode(data)
+
+            if isinstance(decoded, dict):
+                info_hash = hashlib.sha1(encode_bencode(decoded["info"])).digest()
+
+                with socket.create_connection((ip, int(port))) as sock:
+                    sock.sendall(b"".join((length, protocol, reserved, info_hash, peer_id)))
+                    response = sock.recv(68)
+
+                    if response[0] != 0x13:
+                        raise ValueError(f"Invalid handshake response: Expected 0x13 got {response[0]}")
+                    if response[1:20] != "BitTorrent protocol".encode():
+                        raise ValueError(f"Invalid handshake response: Expected 'BitTorrent protocol' got '{response[1:20]}'")
+                    #if response[20:28] != b"\x00" * 8:
+                    #    raise ValueError(f"Invalid handshake response: Expected '{b"\x00" * 8}', got '{response[20:28]}'")
+                    if response[28:48] != info_hash:
+                        raise ValueError(f"Invalid handshake response: Expected '{info_hash}', got '{response[28:48]}'")
+                    
+                    peer_id = response[48:]
+                    print(f"Peer ID: {peer_id.hex()}")
+            
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
