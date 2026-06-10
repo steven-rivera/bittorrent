@@ -1,10 +1,9 @@
 import json
 import sys
 import hashlib
-
-# import bencodepy - available if you need it!
-# import requests - available if you need it!
-
+import requests
+import random
+import string
 
 # Examples:
 #
@@ -12,6 +11,7 @@ import hashlib
 # - decode_string(b"10:hello12345") -> b"hello12345"
 
 SHA1_SIZE = 20
+
 
 def decode_string(bencoded_value: bytes, start: int) -> tuple[bytes, int]:
     colon_index = bencoded_value.find(b":", start)
@@ -227,6 +227,7 @@ def main():
             decoded, _ = decode_bencode(data)
 
             print(decoded)
+
             if isinstance(decoded, dict):
                 print(f"Tracker URL: {decoded['announce'].decode()}")
                 print(f"Length: {decoded['info']['length']}")
@@ -235,14 +236,47 @@ def main():
                 )
                 print(f"Piece Length: {decoded['info']['piece length']}")
                 print(f"Piece Hashes: {decoded['info']['piece length']}")
-
-                pieces: bytes = decoded['info']['pieces']
-
+                pieces: bytes = decoded["info"]["pieces"]
                 if len(pieces) % SHA1_SIZE != 0:
-                    raise ValueError(f"Invalid torrent: pieces field length is not divisible by {SHA1_SIZE}")
-                
+                    raise ValueError(
+                        f"Invalid torrent: pieces field length is not divisible by {SHA1_SIZE}"
+                    )
+
                 for i in range(0, len(pieces), SHA1_SIZE):
-                    print(pieces[i:i+SHA1_SIZE].hex())
+                    print(pieces[i : i + SHA1_SIZE].hex())
+
+    elif command == "peers":
+        file_name = sys.argv[2]
+
+        with open(file_name, "rb") as f:
+            data = f.read()
+
+            decoded, _ = decode_bencode(data)
+
+            if isinstance(decoded, dict):
+                tracker_url = decoded["announce"].decode()
+                info_hash = hashlib.sha1(encode_bencode(decoded["info"])).digest()
+
+                r = requests.get(
+                    tracker_url,
+                    params={
+                        "info_hash": info_hash,
+                        "peer_id": ''.join(random.choices(string.ascii_letters + string.digits, k=20)),
+                        "port": 6881,
+                        "uploaded": 0,
+                        "downloaded": 0,
+                        "left": decoded['info']['length'],
+                        "compact": 1,
+                    },
+                )
+
+                if r.status_code == requests.codes.ok:
+                    decoded_resp, _ = decode_bencode(r.content)
+                    if isinstance(decoded_resp, dict):
+                        peers = decoded_resp['peers']
+                        for i in range(0, len(peers), 6):
+                            print(f"{peers[i]}.{peers[i+1]}.{peers[i+2]}.{peers[i+3]}:{int.from_bytes(peers[i+4:i+6], byteorder='big')}")
+
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
