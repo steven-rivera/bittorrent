@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import TypeVar, Iterator
+from enum import Enum
 import bencode
 import hashlib
 import requests
@@ -10,23 +11,25 @@ import socket
 T = TypeVar("T")
 SHA1_SIZE = 20
 
-ANNOUNCE_KEY = b"announce"
-INFO_KEY = b"info"
-PIECE_LEN_KEY = b"piece length"
-PIECES_KEY = b"pieces"
-NAME_KEY = b"name"
-LENGTH_KEY = b"length"
+ANNOUNCE_KEY = "announce"
+INFO_KEY = "info"
+PIECE_LEN_KEY = "piece length"
+PIECES_KEY = "pieces"
+NAME_KEY = "name"
+LENGTH_KEY = "length"
 
-FAILURE_KEY = b"failure reason"
-INTERVAL_KEY = b"interval"
-PEERS_KEY = b"peers"
+FAILURE_KEY = "failure reason"
+INTERVAL_KEY = "interval"
+PEERS_KEY = "peers"
 
 
 class InvalidBencodedData(Exception):
     pass
 
+
 class TrackerError(Exception):
     pass
+
 
 class DownloadError(Exception):
     pass
@@ -57,6 +60,12 @@ class Info:
         start = index * SHA1_SIZE
         end = start + SHA1_SIZE
         return self.pieces[start:end]
+    
+    def get_piece_len(self, index: int) -> int:
+        start = self.piece_length * index
+        if start >= self.length:
+            raise IndexError(f"Invalid piece index {index}. Torrent only has {len(self.pieces) // SHA1_SIZE} pieces")
+        return min(self.piece_length, self.length - start)
 
 
 @dataclass
@@ -80,17 +89,29 @@ class Peer:
     port: int
 
 
+class PeerMessage(Enum):
+    CHOKE = 0
+    UNCHOKE = 1
+    INTERESTED = 2
+    NOT_INTERESTED = 3
+    HAVE = 4
+    BITFIELD = 5
+    REQUEST = 6
+    PIECE = 7
+    CANCEL = 8
+
+
 def require_type(
-    dictionary: dict[bytes, bencode.DecodedValue], key: bytes, expected_type: type[T]
+    dictionary: dict[str, bencode.DecodedValue], key: str, expected_type: type[T]
 ) -> T:
     value = dictionary.get(key)
 
     if value is None:
-        raise InvalidBencodedData(f"Missing key '{key.decode()}'")
+        raise InvalidBencodedData(f"Missing key '{key}'")
 
     if not isinstance(value, expected_type):
         raise InvalidBencodedData(
-            f"Expected {expected_type.__name__} as value for key '{key.decode()}'"
+            f"Expected {expected_type.__name__} as value for key '{key}'"
         )
 
     return value
@@ -118,7 +139,7 @@ def parse_torrent(file: str) -> Torrent:
 
         if len(pieces) % SHA1_SIZE != 0:
             raise InvalidBencodedData(
-                f"'{PIECES_KEY.decode()}' is not a multiple of {SHA1_SIZE}"
+                f"'{PIECES_KEY}' is not a multiple of {SHA1_SIZE}"
             )
 
         return Torrent(
@@ -181,90 +202,131 @@ def get_peers(torrent: Torrent) -> list[Peer]:
     return peers
 
 
+def recv_all(conn: socket.socket, expected: int) -> bytes:
+    res = bytearray()
+
+    recieved = 0
+    while recieved < expected:
+        chunk = conn.recv(min(expected - recieved, expected))
+        if chunk == b'':
+            raise DownloadError("Peer closed connection")
+
+        res += chunk
+        recieved += len(chunk)
+
+    return bytes(res)
+
+
 def perform_handshake(conn: socket.socket, info_hash: bytes) -> bytes:
     length = b"\x13"
     protocol = "BitTorrent protocol".encode()
     reserved = b"\x00" * 8
     peer_id = os.urandom(20)
 
-    conn.sendall(b"".join((length, protocol, reserved, info_hash, peer_id)))
-    response = conn.recv(68)
+    handshake = b"".join((length, protocol, reserved, info_hash, peer_id))
+    conn.sendall(handshake)
+
+    response = recv_all(conn, len(handshake))
 
     if response[0] != 0x13:
-        raise ValueError(f"Invalid handshake response: Expected 0x13 got {response[0]}")
+        raise DownloadError(
+            f"Invalid handshake response: Expected 0x13 got {response[0]}"
+        )
     if response[1:20] != "BitTorrent protocol".encode():
-        raise ValueError(
+        raise DownloadError(
             f"Invalid handshake response: Expected 'BitTorrent protocol' got '{response[1:20]}'"
         )
     # if response[20:28] != b"\x00" * 8:
-    #    raise ValueError(
+    #    raise DownloadError(
     #        f"Invalid handshake response: Expected '{b'\x00' * 8}', got '{response[20:28]}'"
     #    )
     if response[28:48] != info_hash:
-        raise ValueError(
+        raise DownloadError(
             f"Invalid handshake response: Expected '{info_hash}', got '{response[28:48]}'"
         )
 
+    # peer_id
     return response[48:]
 
 
-def get_bitfield(conn: socket.socket) -> bytes:
-    length = int.from_bytes(conn.recv(4), byteorder="big")
+# +-------------------+
+# | length (4 bytes)  |
+# +-------------------+
+# | message id (1 B)  |
+# +-------------------+
+# | payload (n bytes) |
+# +-------------------+
 
-    data = conn.recv(length + 1)
+# The length field includes both the length of the message ID (1 byte).
+
+
+def get_bitfield(conn: socket.socket) -> bytes:
+    length = int.from_bytes(recv_all(conn, 4), byteorder="big")
+
+    data = recv_all(conn, length)
     message_id = data[0]
 
-    if message_id != 5:
-        raise ValueError(f"Expected bitfield message (type 5) got type {message_id}")
+    if message_id != PeerMessage.BITFIELD.value:
+        raise DownloadError(
+            f"Expected {PeerMessage.BITFIELD.name} peer message but got type {message_id}"
+        )
 
     return data[1:]
 
 
 def send_interested(conn: socket.socket) -> None:
-    conn.sendall(b"\x00\x00\x00\x01\x02")
+    length_prefix = (1).to_bytes(length=4, byteorder="big")
+    message_id = PeerMessage.INTERESTED.value.to_bytes(length=1)
+
+    conn.sendall(length_prefix + message_id)
 
 
 def get_unchoke(conn: socket.socket) -> None:
-    data = conn.recv(5)
-    if data[4] != 1:
-        raise ValueError(f"Expected unchoke message (type 1) got type {data[4]}")
+    length = int.from_bytes(recv_all(conn, 4), byteorder="big")
+
+    data = recv_all(conn, length)
+    message_id = data[0]
+
+    if message_id != PeerMessage.UNCHOKE.value:
+        raise DownloadError(
+            f"Expected {PeerMessage.UNCHOKE.name} peer message got type {message_id}"
+        )
 
 
 def get_piece(conn: socket.socket, piece_index: int, piece_length: int) -> bytes:
     piece = bytearray(piece_length)
+    piece_index_b = piece_index.to_bytes(length=4, byteorder="big")
 
-    for begin in range(0, piece_length, 16 * 1024):
-        print(f"Requesting piece {piece_index} offset {begin}, {piece_length=}")
-        message_id = b"\x06"  # request
-        index = piece_index.to_bytes(4, byteorder="big")
-        begin_b = begin.to_bytes(4, byteorder="big")
-        block_len = min(16 * 1024, piece_length - begin).to_bytes(4, byteorder="big")
-        size = len(message_id) + len(index) + len(begin_b) + len(block_len)
-        size = size.to_bytes(4, byteorder="big")
+    for begin in range(0, piece_length, 16 * 1024):        
+        message_id_b = PeerMessage.REQUEST.value.to_bytes(length=1)
+        begin_b = begin.to_bytes(length=4, byteorder="big")
+        block_len_b = min(16 * 1024, piece_length - begin).to_bytes(
+            length=4, byteorder="big"
+        )
 
-        conn.sendall(b"".join([size, message_id, index, begin_b, block_len]))
+        msg_len = len(message_id_b) + len(piece_index_b) + len(begin_b) + len(block_len_b)
+        msg_len_b = msg_len.to_bytes(4, byteorder="big")
 
-        message_len = conn.recv(4)
-        message_len = int.from_bytes(message_len, byteorder="big")
+        conn.sendall(
+            b"".join([msg_len_b, message_id_b, piece_index_b, begin_b, block_len_b])
+        )
 
-        resp = conn.recv(9)
-        if resp[0] != 7:
-            raise ValueError(f"Expected message_id of 7 (piece) got {resp[0]}")
+        message_len = int.from_bytes(recv_all(conn, 4), byteorder="big")
+        resp = recv_all(conn, message_len)
 
-        index = int.from_bytes(resp[1:5], byteorder="big")
-        if index != piece_index:
-            raise ValueError(f"Expected piece index {piece_index} but got {index}")
+        message_id = resp[0]
+        if message_id != PeerMessage.PIECE.value:
+            raise DownloadError(
+                f"Expected {PeerMessage.PIECE.name} peer message but got type {message_id}"
+            )
+        piece_index_resp = int.from_bytes(resp[1:5], byteorder="big")
+        if piece_index_resp != piece_index:
+            raise DownloadError(
+                f"Expected piece index {piece_index} but got {piece_index_resp}"
+            )
 
         begin = int.from_bytes(resp[5:9], byteorder="big")
-
-        block = bytearray()
-        block_size = message_len - 9
-        bytes_recd = 0
-        while bytes_recd < block_size:
-            chunk = conn.recv(min(block_size - bytes_recd, block_size))
-            block += chunk
-            bytes_recd += len(chunk)
-
-        piece[begin : begin + block_size] = block
+        block = resp[9:]
+        piece[begin : begin + len(block)] = block
 
     return piece
