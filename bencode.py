@@ -46,7 +46,7 @@ class EncodeError(Exception):
     pass
 
 
-type DecodedValue = int | bytes | list[DecodedValue] | dict[bytes, DecodedValue]
+type DecodedValue = int | bytes | list[DecodedValue] | dict[str, DecodedValue]
 
 
 def decode(data: bytes) -> DecodedValue:
@@ -120,7 +120,8 @@ def _decode_integer(data: bytes, index: int) -> tuple[int, int]:
     if not digits.isdigit():
         DecodeError("Invalid bencoded integer: only characters 0-9 allowed")
 
-    return int(digits), e_idx + 1
+    i = int(digits)
+    return -i if negative else i, e_idx + 1
 
 
 def _decode_list(data: bytes, start: int) -> tuple[list[DecodedValue], int]:
@@ -142,7 +143,7 @@ def _decode_list(data: bytes, start: int) -> tuple[list[DecodedValue], int]:
 
 def _decode_dictionary(
     data: bytes, start: int
-) -> tuple[dict[bytes, DecodedValue], int]:
+) -> tuple[dict[str, DecodedValue], int]:
     if data[start] != ord("d"):
         raise DecodeError("Invalid bencoded dictionary: must start with 'd'")
 
@@ -160,7 +161,7 @@ def _decode_dictionary(
 
         value, curr = _decode(data, start=curr)
 
-        decoded_dict[key] = value
+        decoded_dict[key.decode()] = value
 
     if data[curr] != ord("e"):
         raise DecodeError("Invalid bencoded dictionary: missing terminating 'e'")
