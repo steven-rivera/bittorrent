@@ -1,8 +1,6 @@
 import bencode
 import bittorent
 import json
-import socket
-import hashlib
 import argparse
 
 
@@ -17,55 +15,47 @@ def decode_cmd(args: argparse.Namespace):
             return data.decode()
 
         raise TypeError(f"Type not serializable: {type(data)}")
-    
+
     print(json.dumps(decoded, default=bytes_to_str))
 
 
 def info_cmd(args: argparse.Namespace):
-    torrent = bittorent.parse_torrent(args.file)
-    bittorent.print_torrent_info(torrent)
+    torrent = bittorent.TorrentParser.parse(args.file)
+    torrent.print_info()
 
 
 def peers_cmd(args: argparse.Namespace):
-    torrent = bittorent.parse_torrent(args.file)
-    peers = bittorent.get_peers(torrent)
+    torrent = bittorent.TorrentParser.parse(args.file)
 
-    for peer in peers:
+    for peer in torrent.get_peers():
         print(f"{peer.ip_addr}:{peer.port}")
 
 
 def handshake_cmd(args: argparse.Namespace):
-    torrent = bittorent.parse_torrent(args.file)
-    ip, port = args.addr.split(":")
+    torrent = bittorent.TorrentParser.parse(args.file)
+    addr = tuple(args.addr.split(":"))
 
-    with socket.create_connection((ip, int(port))) as conn:
-        peer_id = bittorent.perform_handshake(conn, torrent.info_hash)
-        print(f"Peer ID: {peer_id.hex()}")
+    peer = bittorent.PeerConn(addr, torrent)
+
+    peer_id = peer._perform_handshake()
+    print(f"Peer ID: {peer_id.hex()}")
+
+    peer.close()
 
 
 def download_piece_cmd(args: argparse.Namespace):
-    torrent = bittorent.parse_torrent(args.file)
-    peers = bittorent.get_peers(torrent)
+    torrent = bittorent.TorrentParser.parse(args.file)
+    peers = torrent.get_peers()
+    addr = (peers[0].ip_addr, peers[0].port)
 
-    ip_addr, port = peers[0].ip_addr, peers[0].port
-    with socket.create_connection((ip_addr, port)) as conn:
-        bittorent.perform_handshake(conn, torrent.info_hash)
-        bittorent.get_bitfield(conn)
-        bittorent.send_interested(conn)
-        bittorent.get_unchoke(conn)
+    peer = bittorent.PeerConn(addr, torrent)
 
-        piece = bittorent.get_piece(conn, args.piece_index, torrent.info.get_piece_len(args.piece_index))
+    peer.prepare()
+    piece = peer.get_piece(args.piece_index)
+    peer.close()
 
-        piece_hash = hashlib.sha1(piece).digest()
-        expected_hash = torrent.info.get_piece_hash(args.piece_index)
-
-        if piece_hash != expected_hash:
-            raise bittorent.DownloadError(
-                f"Piece {args.piece_index} hash does not match expected:\n\t{piece_hash=}\n\t!=\n\t{expected_hash=}"
-            )
-
-        with open(args.output, "wb") as f:
-            f.write(piece)
+    with open(args.output, "wb") as f:
+        f.write(piece)
 
 
 def main():
