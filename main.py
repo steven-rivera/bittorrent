@@ -57,7 +57,13 @@ def download_piece_cmd(args: argparse.Namespace):
     with open(args.output, "wb") as f:
         f.write(piece)
 
+def download_cmd(args: argparse.Namespace):
+    torrent = bittorent.TorrentParser.parse(args.file)
+    peers = torrent.get_peers()
 
+    downloader = bittorent.TorrentDowloader(torrent, peers)
+    downloader.download(args.output)
+ 
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -126,6 +132,24 @@ def main():
         type=int,
     )
     download_piece.set_defaults(func=download_piece_cmd)
+
+    # download command
+    download = subparsers.add_parser(
+        "download",
+        help="Dowload single piece from torrent",
+    )
+    download.add_argument(
+        "-o",
+        help="name of file to store piece",
+        required=True,
+        metavar="OUTPUT_FILE",
+        dest="output",
+    )
+    download.add_argument(
+        "file",
+        help="path to torrent file",
+    )
+    download.set_defaults(func=download_cmd)
 
     # parse the args and call whatever function was selected
     args = parser.parse_args()

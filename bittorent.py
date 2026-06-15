@@ -74,6 +74,9 @@ class Info:
     # The length of the file, in bytes
     length: int
 
+    def num_pieces(self) -> int:
+        return len(self.pieces) // SHA1_SIZE
+
     def iter_piece_hashes(self) -> Iterator[bytes]:
         for i in range(0, len(self.pieces), SHA1_SIZE):
             yield self.pieces[i : i + SHA1_SIZE]
@@ -195,6 +198,36 @@ class TorrentParser:
             ),
             info_hash=hashlib.sha1(bencode.encode(info)).digest(),
         )
+    
+class TorrentDowloader():
+    def __init__(self, torrent: Torrent, peers: list[Peer]):
+        self.torrent = torrent
+        self.peers = peers
+
+    def download(self, output: str):
+        addr = (self.peers[0].ip_addr, self.peers[0].port)
+        peer = PeerConn(addr, self.torrent)
+
+        peer.prepare()
+
+        remaining = {piece_idx for piece_idx in range(self.torrent.info.num_pieces())}
+        pieces: dict[int, bytes] = dict()
+
+        while len(remaining) > 0:
+            piece_idx = remaining.pop()
+
+            print(f"Downloading piece {piece_idx}")
+            piece = peer.get_piece(piece_idx)
+
+            pieces[piece_idx] = piece
+
+        with open(output, "wb") as f:
+            for piece_idx, piece in pieces.items():
+                f.seek(piece_idx * self.torrent.info.piece_length)
+                f.write(piece)
+    
+        peer.close()
+
 
 
 class PeerMessageID(Enum):
@@ -218,6 +251,8 @@ class PeerConn:
     STATE_BITFIELD: str = "STATE_BITFIELD"
     STATE_CHOKED: str = "STATE_CHOKED"
     STATE_REQUEST: str = "STATE_REQUEST"
+
+    MAX_PENDING: int = 5
 
     def __init__(self, addr: tuple[str, int], torrent: Torrent):
         self.torrent = torrent
@@ -245,8 +280,8 @@ class PeerConn:
     def prepare(self):
         self.peer_id = self._perform_handshake()
         self.bitfield = self._get_bitfield()
-        self.send_message(PeerMessageID.INTERESTED)
-        self.recv_message(expected=PeerMessageID.UNCHOKE)
+        self.send_peer_message(PeerMessageID.INTERESTED)
+        self.recv_peer_message(expected=PeerMessageID.UNCHOKE)
 
     def handshake_msg(self) -> bytes:
         return b"".join(
@@ -292,12 +327,14 @@ class PeerConn:
         if self.state != PeerConn.STATE_BITFIELD:
             return b""
 
-        _, payload = self.recv_message(expected=PeerMessageID.BITFIELD)
+        _, payload = self.recv_peer_message(expected=PeerMessageID.BITFIELD)
         self.state = PeerConn.STATE_CHOKED
 
         return payload
 
-    def send_message(self, message_id: PeerMessageID, payload: bytes = b"") -> None:
+    def send_peer_message(
+        self, message_id: PeerMessageID, payload: bytes = b""
+    ) -> None:
         """
         Peer messages consist of:
 
@@ -318,7 +355,7 @@ class PeerConn:
 
         self.conn.sendall(msg)
 
-    def recv_message(
+    def recv_peer_message(
         self, expected: PeerMessageID | None = None
     ) -> tuple[PeerMessageID, bytes]:
         """
@@ -348,18 +385,18 @@ class PeerConn:
 
         return message_id, payload
 
-    def build_request_msg_payload(
-        self, piece_index: int, begin: int, block_len: int
-    ) -> bytes:
+    @staticmethod
+    def build_request_msg_payload(piece_idx: int, begin: int, block_len: int) -> bytes:
         return b"".join(
             [
-                piece_index.to_bytes(length=4, byteorder="big"),
+                piece_idx.to_bytes(length=4, byteorder="big"),
                 begin.to_bytes(length=4, byteorder="big"),
                 block_len.to_bytes(length=4, byteorder="big"),
             ]
         )
 
-    def parse_piece_msg_payload(self, payload: bytes) -> tuple[int, int, bytes]:
+    @staticmethod
+    def parse_piece_msg_payload(payload: bytes) -> tuple[int, int, bytes]:
         index = int.from_bytes(
             payload[0:4],
             byteorder="big",
@@ -372,30 +409,74 @@ class PeerConn:
 
         return index, begin, block
 
-    def get_piece(self, piece_index: int) -> bytes:
-        piece_length = self.torrent.info.get_piece_len(piece_index)
-        piece = bytearray(piece_length)
+    def send_request_msg(self, piece_idx: int, block_offset: int, piece_len: int):
+        """
+        The payload for this message consists of:
+            index: the zero-based piece index
 
-        for begin in range(0, piece_length, BLOCK_SIZE):
-            block_len = min(BLOCK_SIZE, piece_length - begin)
-            payload = self.build_request_msg_payload(piece_index, begin, block_len)
+            begin: the zero-based byte offset within the piece
+                - This'll be 0 for the first block, 2^14 for the second block, 2*2^14 for the third block etc.
 
-            self.send_message(PeerMessageID.REQUEST, payload=payload)
-            _, resp_payload = self.recv_message(expected=PeerMessageID.PIECE)
+            length: the length of the block in bytes
+                - This'll be 2^14 (16 * 1024) for all blocks except the last one. The last block will contain 2^14 bytes or less.
+        """
+        payload = PeerConn.build_request_msg_payload(
+            piece_idx=piece_idx,
+            begin=block_offset,
+            block_len=min(BLOCK_SIZE, piece_len - block_offset),
+        )
 
-            index, begin, block = self.parse_piece_msg_payload(resp_payload)
+        self.send_peer_message(PeerMessageID.REQUEST, payload=payload)
 
-            if index != piece_index:
-                raise PeerError(f"Expected piece index {piece_index} but got {index}")
+    def next_block_offset(self, piece_len: int) -> int | None:
+        if self.begin >= piece_len:
+            return None
 
-            piece[begin : begin + len(block)] = block
+        block = self.begin
+        self.begin += BLOCK_SIZE
+
+        return block
+
+    def pipeline_requests(self, piece_idx: int, piece_len: int):
+        while len(self.pending) < PeerConn.MAX_PENDING:
+            offset = self.next_block_offset(piece_len)
+            if offset is None:
+                return
+
+            self.send_request_msg(piece_idx, offset, piece_len)
+            self.pending.add(offset)
+
+    def get_piece(self, piece_idx: int) -> bytes:
+        self.begin = 0
+        self.pending = set()
+
+        piece_len = self.torrent.info.get_piece_len(piece_idx)
+        piece = bytearray(piece_len)
+
+        self.pipeline_requests(piece_idx, piece_len)
+
+        while len(self.pending) > 0:
+            message_id, resp_payload = self.recv_peer_message(
+                expected=PeerMessageID.PIECE
+            )
+
+            if message_id == PeerMessageID.PIECE:
+                index, begin, block = PeerConn.parse_piece_msg_payload(resp_payload)
+
+                if index != piece_idx:
+                    raise PeerError(f"Expected piece index {piece_idx} but got {index}")
+
+                piece[begin : begin + len(block)] = block
+
+                self.pending.remove(begin)
+                self.pipeline_requests(piece_idx, piece_len)
 
         piece_hash = hashlib.sha1(piece).digest()
-        expected_hash = self.torrent.info.get_piece_hash(piece_index)
+        expected_hash = self.torrent.info.get_piece_hash(piece_idx)
 
         if piece_hash != expected_hash:
             raise PeerError(
-                f"Piece {piece_index} hash does not match expected:\n\t{piece_hash=}\n\t!=\n\t{expected_hash=}"
+                f"Piece {piece_idx} hash does not match expected:\n\t{piece_hash=}\n\t!=\n\t{expected_hash=}"
             )
 
         return piece
