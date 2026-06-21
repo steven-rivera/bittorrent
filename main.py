@@ -1,12 +1,13 @@
-import bencode
-import bittorent
-import json
 import argparse
+import json
+import socket
+
+import bittorent
 
 
 def decode_cmd(args: argparse.Namespace):
     data: str = args.data
-    decoded = bencode.decode(data.encode())
+    decoded = bittorent.bencode.decode(data.encode())
 
     def bytes_to_str(data):
         # json.dumps() can't handle bytes, but bencoded "strings" need to be
@@ -35,35 +36,37 @@ def handshake_cmd(args: argparse.Namespace):
     torrent = bittorent.TorrentParser.parse(args.file)
     addr = tuple(args.addr.split(":"))
 
-    peer = bittorent.PeerConn(addr, torrent)
+    with socket.create_connection(addr, timeout=5) as sock:
+        peer = bittorent.PeerConnection(sock, torrent)
 
-    peer_id = peer._perform_handshake()
-    print(f"Peer ID: {peer_id.hex()}")
-
-    peer.close()
+        peer_id = peer.handshake()
+        print(f"Peer ID: {peer_id.hex()}")
 
 
 def download_piece_cmd(args: argparse.Namespace):
     torrent = bittorent.TorrentParser.parse(args.file)
     peers = torrent.get_peers()
+
     addr = (peers[0].ip_addr, peers[0].port)
 
-    peer = bittorent.PeerConn(addr, torrent)
+    with socket.create_connection(addr, timeout=5) as sock:
+        peer = bittorent.PeerConnection(sock, torrent)
 
-    peer.prepare()
-    piece = peer.get_piece(args.piece_index)
-    peer.close()
+        peer.handshake()
+        peer.start()
+        piece = peer.download_piece(args.piece_index)
 
-    with open(args.output, "wb") as f:
-        f.write(piece)
+        with open(args.output, "wb") as f:
+            f.write(piece)
+
 
 def download_cmd(args: argparse.Namespace):
     torrent = bittorent.TorrentParser.parse(args.file)
-    peers = torrent.get_peers()
 
-    downloader = bittorent.TorrentDowloader(torrent, peers)
-    downloader.download(args.output)
- 
+    client = bittorent.TorrentClient(torrent, output=args.output)
+    client.download()
+
+
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)

@@ -7,35 +7,7 @@
 # - Dictionaries
 
 
-# Bencoded byte strings are length-prefixed in base ten followed by a colon and the string.
-#
-# Ex:
-#   b"5:hello" corresponds to b"hello"
-#   b"10:hello12345" corresponds to b"10:hello12345"
-
-
-# Bencoded integers are represented by an 'i' followed by the number in base 10 followed by an 'e'.
-# All encodings with a leading zero, such as i03e, are invalid, other than i0e, which of course
-# corresponds to 0. Integers have no size limitation. i-0e is invalid.
-#
-# Ex:
-#   b"i67e" corresponds to 67
-#   b"i-67e" corresponds to -67
-
-
-# Lists are encoded as an 'l' followed by their elements (also bencoded) followed by an 'e'.
-#
-# Ex:
-#   b"l4:spam4:eggse" corresponds to [b"spam", b"eggs"]
-#   b"l5:helloi52ee" corresponds to [b"hello", 52]
-
-
-# Dictionaries are encoded as a 'd' followed by a list of alternating keys and their corresponding values followed by an 'e'.
-# Keys must be strings and appear in sorted order (sorted as raw strings, not alphanumerics).
-#
-# Ex:
-#   b"d3:cow3:moo4:spam4:eggse" corresponds to {b"cow": b"moo", b"spam": b"eggs"}
-#   b"d4:spaml1:ai69eee" corresponds to {b"spam": [b"a", 69]}.
+type DecodedValue = int | bytes | list[DecodedValue] | dict[str, DecodedValue]
 
 
 class DecodeError(Exception):
@@ -44,9 +16,6 @@ class DecodeError(Exception):
 
 class EncodeError(Exception):
     pass
-
-
-type DecodedValue = int | bytes | list[DecodedValue] | dict[str, DecodedValue]
 
 
 def decode(data: bytes) -> DecodedValue:
@@ -75,6 +44,13 @@ def _decode(data: bytes, start: int = 0) -> tuple[DecodedValue, int]:
     )
 
 
+# Bencoded byte strings are length-prefixed in base ten followed by a colon and the string.
+#
+# Ex:
+#   b"5:hello" corresponds to b"hello"
+#   b"10:hello12345" corresponds to b"10:hello12345"
+
+
 def _decode_byte_string(data: bytes, start: int) -> tuple[bytes, int]:
     colon_idx = data.find(b":", start)
     if colon_idx == -1:
@@ -91,6 +67,15 @@ def _decode_byte_string(data: bytes, start: int) -> tuple[bytes, int]:
     str_end = str_start + length
 
     return data[str_start:str_end], str_end
+
+
+# Bencoded integers are represented by an 'i' followed by the number in base 10 followed by an 'e'.
+# All encodings with a leading zero, such as i03e, are invalid, other than i0e, which of course
+# corresponds to 0. Integers have no size limitation. i-0e is invalid.
+#
+# Ex:
+#   b"i67e" corresponds to 67
+#   b"i-67e" corresponds to -67
 
 
 def _decode_integer(data: bytes, index: int) -> tuple[int, int]:
@@ -124,6 +109,13 @@ def _decode_integer(data: bytes, index: int) -> tuple[int, int]:
     return -i if negative else i, e_idx + 1
 
 
+# Lists are encoded as an 'l' followed by their elements (also bencoded) followed by an 'e'.
+#
+# Ex:
+#   b"l4:spam4:eggse" corresponds to [b"spam", b"eggs"]
+#   b"l5:helloi52ee" corresponds to [b"hello", 52]
+
+
 def _decode_list(data: bytes, start: int) -> tuple[list[DecodedValue], int]:
     if data[start] != ord("l"):
         raise DecodeError("Invalid bencoded list: must start with 'l'")
@@ -141,9 +133,15 @@ def _decode_list(data: bytes, start: int) -> tuple[list[DecodedValue], int]:
     return decoded_list, curr + 1
 
 
-def _decode_dictionary(
-    data: bytes, start: int
-) -> tuple[dict[str, DecodedValue], int]:
+# Dictionaries are encoded as a 'd' followed by a list of alternating keys and their corresponding values followed by an 'e'.
+# Keys must be strings and appear in sorted order (sorted as raw strings, not alphanumerics).
+#
+# Ex:
+#   b"d3:cow3:moo4:spam4:eggse" corresponds to {b"cow": b"moo", b"spam": b"eggs"}
+#   b"d4:spaml1:ai69eee" corresponds to {b"spam": [b"a", 69]}.
+
+
+def _decode_dictionary(data: bytes, start: int) -> tuple[dict[str, DecodedValue], int]:
     if data[start] != ord("d"):
         raise DecodeError("Invalid bencoded dictionary: must start with 'd'")
 
